@@ -1,3 +1,4 @@
+# Importing necessary libraries and modules
 import streamlit as st
 import pandas as pd
 from langchain_community.llms import Ollama
@@ -15,30 +16,44 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
 def main():
+    # Initialize inflect engine for pluralization
     p = inflect.engine()
 
+    # Set the configuration for the Streamlit page
     st.set_page_config(
         page_title="SQL ChatBot",
         layout="wide"
     )
-    st.title("SQL Chatbot")
+    st.title("SQL Chatbot")  # Set the title for the Streamlit app
+    
+    # Initialize session state variables if they do not exist
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
     if "df" not in st.session_state:
         st.session_state.df = None
 
+    # Define database name and URI
     db_name = "Chinook"
     db_uri = f"mysql+mysqlconnector://root:Jyoti1974!@localhost:3306/{db_name}"
-    db = SQLDatabase.from_uri(db_uri)
+    db = SQLDatabase.from_uri(db_uri)  # Create an SQLDatabase instance
 
+    # Initialize the language model (LLM) with the "codeqwen" model
     llm = Ollama(model="codeqwen")
 
+    # Display previous chat messages stored in session state
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.write(message["content"])
+    
+    # Get user input through the chat interface
     user_question = st.chat_input("Ask me Anything")
 
+    # Generate document descriptions and embeddings based on the database schema
+    documents = LLMDetail(get_columns_info(schema=db_name))
+    data = OllamaEmbedder(documents=documents, user_question=user_question)
+    
+    # Generate and execute SQL query based on the user's question
     LLM(
         user_question=user_question,
         llm=llm,
@@ -46,98 +61,102 @@ def main():
         db=db
     )
 
-def LLM(user_question,llm,db_name,db):
-    if user_question:
-        with st.chat_message("user"):
-            st.write(user_question)
-            st.session_state.messages.append({"role": "user", "content": user_question})
+def LLM(user_question, llm, db_name, db, data):
+    i = 0
+    while i < 3:  # Retry loop for error handling, tries 3 times max
+        if user_question:
+            # Display user's question in the chat interface
+            with st.chat_message("user"):
+                st.write(user_question)
+                st.session_state.messages.append({"role": "user", "content": user_question})
 
-        with st.spinner("Thinking..."):
-            documents = LLMDetail(get_columns_info(schema=db_name))
-            data = OllamaEmbedder(documents=documents,user_question = user_question)
+            with st.spinner("Thinking..."):
+                # Define the response schema for the SQL query
+                sql_query_schema = ResponseSchema(name="SQL Query", description="This is the SQL Query to pass to the database")
+                response_schemas = [sql_query_schema]
+                output_parser = StructuredOutputParser.from_response_schemas(response_schemas)
+                format_instructions = output_parser.get_format_instructions()
+                st.write(format_instructions)
+                
+                # Create the prompt template for the LLM to generate SQL queries
+                template = """
+                You are an advanced AI designed to generate precise SQL queries from natural language questions based on detailed information about a MySQL database.
 
+                **Your task is to:**
+                1. Understand the Table Names: Identify and use the correct table names. Accurate table names are crucial for forming the correct query.
+                2. Analyze Table Descriptions: Utilize the detailed descriptions of each table to correctly understand the structure and relationships of the data.
+                3. Refer to Table Details: Use the specific details from each table to create accurate SQL queries. This includes understanding the data and its format.
+                4. Generate the SQL Query: Formulate a SQL query that retrieves the relevant data based on the user's question and provided database information.
+                5. Ensure the query:
+                - Orders the results by relevant columns when applicable.
+                - Selects only the necessary columns relevant to the user's question.
+                - Is syntactically correct and logically sound.
+                6. Do not make any data modification statements (INSERT, UPDATE, DELETE, DROP, etc.) to the database.
+                7. If the user's question does not relate to the database, respond with "I don't know."
 
-            sql_query_schema = ResponseSchema(name="SQL Query", description="This is the SQL Query to pass to the database")
-            response_schemas = [sql_query_schema]
-            output_parser = StructuredOutputParser.from_response_schemas(response_schemas)
-            format_instructions = output_parser.get_format_instructions()
-            st.write(format_instructions)
-            template = """
-            You are an advanced AI designed to generate precise SQL queries from natural language questions based on detailed information about a MySQL database.
+                **Provided Information**:
+                {data}
 
-            **Your task is to:**
-            1. Understand the Table Names: Identify and use the correct table names. Accurate table names are crucial for forming the correct query.
-            2. Analyze Table Descriptions: Utilize the detailed descriptions of each table to correctly understand the structure and relationships of the data.
-            3. Refer to Table Details: Use the specific details from each table to create accurate SQL queries. This includes understanding the data and its format.
-            4. Generate the SQL Query: Formulate a SQL query that retrieves the relevant data based on the user's question and provided database information.
-            5. Ensure the query:
-            - Orders the results by relevant columns when applicable.
-            - Selects only the necessary columns relevant to the user's question.
-            - Is syntactically correct and logically sound.
-            6. Do not make any data modification statements (INSERT, UPDATE, DELETE, DROP, etc.) to the database.
-            7. If the user's question does not relate to the database, respond with "I don't know."
-
-            **Provided Information**:
-            {data}
-
-            **Format Instructions**:
-            {format_instructions}
-            """
-            prompt = ChatPromptTemplate.from_template(template=template)
-            messages = prompt.format_messages(
-                data = data, format_instructions=format_instructions
-            )
-            response = llm.invoke(messages[0].content)
-            st.write("LLM Response:", response)
-            
-            json_pattern = r'\{(?:[^{}"]|"[^"]*"|\d+|true|false|null)*\}'
-            match = re.search(json_pattern, response)
-            if match:
-                json_string = match.group(0)
-                try:
-                    query_dict = json.loads(json_string)
-                    sql_query = query_dict.get("SQL Query", "")
-                    output = db._execute(sql_query)
-                    st.write(output)
-                    
-                    if output:
-                        df = pd.DataFrame(output)
-                        st.session_state.df = df
+                **Format Instructions**:
+                {format_instructions}
+                """
+                
+                # Format the prompt with provided data and format instructions
+                prompt = ChatPromptTemplate.from_template(template=template)
+                messages = prompt.format_messages(
+                    data=data, format_instructions=format_instructions
+                )
+                
+                # Invoke the LLM to generate the SQL query
+                response = llm.invoke(messages[0].content)
+                st.write("LLM Response:", response)
+                
+                # Extract the SQL query from the LLM response
+                json_pattern = r'\{(?:[^{}"]|"[^"]*"|\d+|true|false|null)*\}'
+                match = re.search(json_pattern, response)
+                if match:
+                    json_string = match.group(0)
+                    try:
+                        query_dict = json.loads(json_string)
+                        sql_query = query_dict.get("SQL Query", "")
+                        output = db._execute(sql_query)  # Execute the SQL query
+                        st.write(output)
                         
-                        with st.chat_message("assistant"):
-                            st.write("DataFrame:", df)
-                        st.session_state.messages.append({"role": "assistant", "content": df.to_string()})
-                    else:
-                        error = "No data returned from the query."
+                        if output:
+                            df = pd.DataFrame(output)
+                            st.session_state.df = df
+                            
+                            # Display the output DataFrame in the chat interface
+                            with st.chat_message("assistant"):
+                                st.write("DataFrame:", df)
+                            st.session_state.messages.append({"role": "assistant", "content": df.to_string()})
+                        else:
+                            error = "No data returned from the query."
+                            st.write(error)
+                            st.session_state.messages.append({"role": "assistant", "content": error})
+
+                    except json.JSONDecodeError as e:
+                        error = f"Error decoding JSON: {e}"
+                        if i < 3:
+                            i += 1
+                            continue
                         st.write(error)
                         st.session_state.messages.append({"role": "assistant", "content": error})
 
-                except json.JSONDecodeError as e:
-                    error = f"Error decoding JSON: {e}"
-                    LLM(
-                            user_question=user_question,
-                            llm=llm,
-                            db_name=db_name,
-                            db=db
-                        )
-                except Exception as e:
-                    error = f"Error executing SQL query: {e}"
-                    LLM(
-                        user_question=user_question,
-                        llm=llm,
-                        db_name=db_name,
-                        db=db
-                    )
-            else:
-                error = "No JSON string found."
-                LLM(
-                    user_question=user_question,
-                    llm=llm,
-                    db_name=db_name,
-                    db=db
-                )
-
-
+                    except Exception as e:
+                        error = f"Error executing SQL query: {e}"
+                        if i < 3:
+                            i += 1
+                            continue
+                        st.write(error)
+                        st.session_state.messages.append({"role": "assistant", "content": error})
+                else:
+                    error = "No JSON string found."
+                    if i < 3:
+                        i += 1
+                        continue
+                    st.write(error)
+                    st.session_state.messages.append({"role": "assistant", "content": error})
 
 def get_columns_info(schema):
     import mysql.connector
@@ -223,8 +242,9 @@ def get_columns_info(schema):
                 "query": f"SELECT MAX({columns[5].split(' ')[0]}) FROM {table_name};"
             })
         
-        examples = examples[:20]  
+        examples = examples[:20]  # Limit the number of examples to 20
 
+        # Create a description for the table and its columns with example queries
         examples_text = "Here are some example queries:\n" + "\n".join(
             [f"Input: {example['input']}\nQuery: {example['query']}" for example in examples]
         )
@@ -235,11 +255,11 @@ def get_columns_info(schema):
 
     return description_list
 
-
-
 def LLMDetail(document_info: list):
+    # Initialize the language model (LLM) with the "llama3" model
     llm = Ollama(model="llama3")
 
+    # Define the response schema for detailed descriptions of each table and column
     sql_query_schema = ResponseSchema(
         name="Each Table and Column Description", 
         description="Provide a comprehensive and detailed description for each column of each table, including the table itself. Ensure that no details are left out, including data type, nullability, and any other relevant metadata."
@@ -251,8 +271,7 @@ def LLMDetail(document_info: list):
 
     totalresponse = ""
 
-    
-
+    # Process the document info in chunks to avoid overwhelming the LLM
     chunk_size = 3 
 
     for i in range(0, len(document_info), chunk_size):
@@ -277,24 +296,36 @@ def LLMDetail(document_info: list):
         Make sure to describe all tables and columns presented here.
         """
 
+        # Format the prompt with the document chunk and format instructions
         prompt = ChatPromptTemplate.from_template(template=template)
         messages = prompt.format_messages(
             documents=document_chunk, format_instructions=format_instructions
         )
         
+        # Invoke the LLM to generate detailed descriptions
         response = llm.invoke(messages[0].content)
         st.write("LLM Response:", response)
         totalresponse += response
     return totalresponse
 
-def OllamaEmbedder(documents,user_question):
+def OllamaEmbedder(documents, user_question):
+    # Initialize the Ollama Embeddings model
     ollama_emb = OllamaEmbeddings(model="mxbai-embed-large")
+    
+    # Embed the documents and the user's question
     doc_embeddings = ollama_emb.embed_documents(documents)
     query_embedding = ollama_emb.embed_query(user_question)
+    
+    # Compute the cosine similarity between the query and document embeddings
     similarities = cosine_similarity([query_embedding], doc_embeddings)[0]
+    
+    # Find the most similar document based on cosine similarity
     most_similar_idx = np.argmax(similarities)
+    
+    # Return the most relevant document based on the user's question
     data = documents[most_similar_idx]
     return data
 
+# Run the main function when the script is executed
 if __name__ == "__main__":
     main()
