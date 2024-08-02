@@ -1,0 +1,205 @@
+import streamlit as st
+import pandas as pd
+from langchain_community.llms import Ollama
+from langchain_community.utilities import SQLDatabase
+import json
+import re
+import inflect
+from langchain.prompts import ChatPromptTemplate
+from langchain.output_parsers import ResponseSchema, StructuredOutputParser
+import pygwalker as pyg
+
+p = inflect.engine()
+
+st.title("SQL Chatbot")
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "df" not in st.session_state:
+    st.session_state.df = None
+
+db_uri = "mysql+mysqlconnector://root:Jyoti1974!@localhost:3306/business_db"
+db = SQLDatabase.from_uri(db_uri)
+
+llm = Ollama(model="codeqwen")
+
+tables_response = db._execute("SHOW TABLES")
+
+table_description = ""
+for idx, table in enumerate(tables_response, start=1):
+    table_name = table[0]
+    columns = db._execute(f"DESCRIBE {table_name}")
+    column_names = ', '.join([col[0] for col in columns])
+    table_description += f"The {p.ordinal(idx)} table is '{table_name}' with columns: {column_names}. "
+
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        print(message["content"])
+
+user_question = st.chat_input("Ask me Anything")
+#examples and database selector with semantic similarit search 
+if user_question:
+    with st.chat_message("user"):
+        print(user_question)
+        st.session_state.messages.append({"role": "user", "content": user_question})
+
+    with st.spinner("Thinking..."):
+        table_description += f" Now, using the tables and columns given, generate an SQL query to answer the question: '{user_question}'"
+
+        sql_query_schema = ResponseSchema(name="SQL Query", description="This is the SQL Query to pass to the database")
+        response_schemas = [sql_query_schema]
+        output_parser = StructuredOutputParser.from_response_schemas(response_schemas)
+        format_instructions = output_parser.get_format_instructions()
+
+
+
+        template = """
+        You are an advanced AI designed to generate precise SQL queries from natural language questions based on detailed information about a MySQL database.
+
+        **Your task is to:**
+        1. Understand the Table Names: Identify and use the correct table names. Accurate table names are crucial for forming the correct query.
+        2. Analyze Table Descriptions: Utilize the detailed descriptions of each table to correctly understand the structure and relationships of the data.
+        3. Refer to Table Details: Use the specific details from each table to create accurate SQL queries. This includes understanding the data and its format.
+        4. Generate the SQL Query: Formulate a SQL query that retrieves the relevant data based on the user's question and provided database information.
+        5. Ensure the query:
+        - Orders the results by relevant columns when applicable.
+        - Selects only the necessary columns relevant to the user's question.
+        - Is syntactically correct and logically sound.
+        6. Do not make any data modification statements (INSERT, UPDATE, DELETE, DROP, etc.) to the database.
+        7. If the user's question does not relate to the database, respond with "I don't know."
+
+        **Examples**:
+
+        Business Database Analysis
+
+        ## Question 1
+        **Question**: What is the total sales amount for each product?
+        **SQL Query**:
+        ```sql
+        SELECT p.product_name, SUM(s.total_sale_amount) AS total_sales
+            FROM sales s
+            JOIN products p ON s.product_id = p.product_id
+            GROUP BY p.product_name;
+
+        Question 2
+            Question: Which product has the highest total sales amount?
+            SQL Query:
+            
+            sql
+            Copy code
+            SELECT p.product_name, SUM(s.total_sale_amount) AS total_sales
+            FROM sales s
+            JOIN products p ON s.product_id = p.product_id
+            GROUP BY p.product_name
+            ORDER BY total_sales DESC
+            LIMIT 1;
+
+        Question 3
+            Question: How many products were sold on July 5th, 2024?
+            SQL Query:
+            
+            sql
+            Copy code
+            SELECT s.sale_date, p.product_name, s.quantity_sold
+            FROM sales s
+            JOIN products p ON s.product_id = p.product_id
+            WHERE s.sale_date = '2024-07-05';
+
+        Question 4
+            Question: What is the current stock level of each product?
+            SQL Query:
+            
+            sql
+            Copy code
+            SELECT product_name, quantity_in_stock
+            FROM products;
+
+        Question 5
+            Question: What is the average sales amount per day?
+            SQL Query:
+            
+            sql
+            Copy code
+            SELECT AVG(daily_sales) AS average_daily_sales
+            FROM (
+                SELECT sale_date, SUM(total_sale_amount) AS daily_sales
+                FROM sales
+                GROUP BY sale_date
+            ) AS daily_sales_summary;
+
+        Question 6
+            Question: What is the total quantity sold for each product?
+            SQL Query:
+            
+            sql
+            Copy code
+            SELECT p.product_name, SUM(s.quantity_sold) AS total_quantity_sold
+            FROM sales s
+            JOIN products p ON s.product_id = p.product_id
+            GROUP BY p.product_name;
+
+        Question 7
+            Question: What are the sales details for the product 'Laptop'?
+            SQL Query:
+            
+            sql
+            Copy code
+            SELECT s.sale_date, s.quantity_sold, s.total_sale_amount
+            FROM sales s
+            JOIN products p ON s.product_id = p.product_id
+            WHERE p.product_name = 'Laptop';
+
+        **Provided Information**:
+        {table_description}
+
+        **Format Instructions**:
+        {format_instructions}
+        """
+
+        prompt = ChatPromptTemplate.from_template(template=template)
+        messages = prompt.format_messages(
+            table_description=table_description, format_instructions=format_instructions
+        )
+        print(table_description)
+        response = llm.invoke(messages[0].content)
+        print("LLM Response:", response)
+        #Make prompts for 3 databases and description of table
+        #Do semantic Search on prompt. so you search for the best table and the database
+        json_pattern = r'\{(?:[^{}"]|"[^"]*"|\d+|true|false|null)*\}'
+        match = re.search(json_pattern, response)
+        if match:
+            json_string = match.group(0)
+            try:
+                query_dict = json.loads(json_string)
+                sql_query = query_dict.get("SQL Query", "")
+                sql_query = re.sub(r'\bTOP\b', 'LIMIT', sql_query, flags=re.IGNORECASE)
+                output = db._execute(sql_query)
+                print(output)
+                
+                if output:
+                    columns = [f"Column {i+1}" for i in range(len(output[0]))]
+                    df = pd.DataFrame(output, columns=columns)
+                    st.session_state.df = df  # Store DataFrame in session_state
+                    
+                    with st.chat_message("assistant"):
+                        print("DataFrame:", df)
+                    st.session_state.messages.append({"role": "assistant", "content": df})
+                else:
+                    error = "No data returned from the query."
+                    print(error)
+                    st.session_state.messages.append({"role": "assistant", "content": error})
+            except json.JSONDecodeError as e:
+                error = f"Error decoding JSON: {e}"
+                print(error)
+                st.session_state.messages.append({"role": "assistant", "content": error})
+            except Exception as e:
+                error = f"Error executing SQL query: {e}"
+                print(error)
+                st.session_state.messages.append({"role": "assistant", "content": error})
+        else:
+            error = "No JSON string found."
+            print(error)
+            st.session_state.messages.append({"role": "assistant", "content": error})
+
+
+
