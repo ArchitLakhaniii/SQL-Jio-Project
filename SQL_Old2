@@ -1,0 +1,277 @@
+import streamlit as st
+import pandas as pd
+from langchain_community.llms import Ollama
+from langchain_community.utilities import SQLDatabase
+import json
+import re
+import inflect
+from langchain.prompts import ChatPromptTemplate
+from langchain.output_parsers import ResponseSchema, StructuredOutputParser
+import pygwalker as pyg
+from test3 import get_columns_info
+from pygwalker.api.streamlit import StreamlitRenderer
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.example_selectors import SemanticSimilarityExampleSelector
+p = inflect.engine()
+
+st.set_page_config(
+    page_title="Use Pygwalker In Streamlit",
+    layout="wide"
+)
+
+st.title("SQL Chatbot")
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "df" not in st.session_state:
+    st.session_state.df = None
+
+db_name = "Chinook"
+db_uri = f"mysql+mysqlconnector://root:Jyoti1974!@localhost:3306/{db_name}"
+db = SQLDatabase.from_uri(db_uri)
+
+llm = Ollama(model="codeqwen")
+
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
+table_description = get_columns_info('business_db')
+user_question = st.chat_input("Ask me Anything")
+
+embeddings = (
+    OllamaEmbeddings(model = "llama3")
+)
+# instead of examples, the prompts. formatting of prompts. add examples to the prompts for the related database
+# what I did. difficulties faced and how resolved. flow of the internship and how we develped the code. explanaation
+examples = [
+        {   "input": "List all artists.", 
+            "query": "SELECT * FROM Artist;"},
+        {
+            "input": "Find all albums for the artist 'AC/DC'.",
+            "query": "SELECT * FROM Album WHERE ArtistId = (SELECT ArtistId FROM Artist WHERE Name = 'AC/DC');",
+        },
+        {
+            "input": "List all tracks in the 'Rock' genre.",
+            "query": "SELECT * FROM Track WHERE GenreId = (SELECT GenreId FROM Genre WHERE Name = 'Rock');",
+        },
+        {
+            "input": "Find the total duration of all tracks.",
+            "query": "SELECT SUM(Milliseconds) FROM Track;",
+        },
+        {
+            "input": "List all customers from Canada.",
+            "query": "SELECT * FROM Customer WHERE Country = 'Canada';",
+        },
+        {
+            "input": "How many tracks are there in the album with ID 5?",
+            "query": "SELECT COUNT(*) FROM Track WHERE AlbumId = 5;",
+        },
+        {
+            "input": "Find the total number of Albums.",
+            "query": "SELECT COUNT(DISTINT(AlbumId)) FROM Invoice;",
+        },
+        {
+            "input": "List all tracks that are longer than 5 minutes.",
+            "query": "SELECT * FROM Track WHERE Milliseconds > 300000;",
+        },
+        {
+            "input": "Who are the top 5 customers by total purchase?",
+            "query": "SELECT CustomerId, SUM(Total) AS TotalPurchase FROM Invoice GROUP BY CustomerId ORDER BY TotalPurchase DESC LIMIT 5;",
+        },
+        {
+            "input": "How many employees are there",
+            "query": 'SELECT COUNT(*) FROM "Employee"',
+        },
+    ]
+queries = [
+        {
+            "input": "Retrieve all records from a dataset.",
+            "query": "SELECT * FROM Dataset;"
+        },
+        {
+            "input": "Show only the names and ages of all entities.",
+            "query": "SELECT Name, Age FROM Entities;"
+        },
+        {
+            "input": "Find entities where a certain attribute meets a specified condition.",
+            "query": "SELECT * FROM Entities WHERE Attribute = 'Condition';"
+        },
+        {
+            "input": "Get records where two conditions are met.",
+            "query": "SELECT * FROM Entities WHERE Condition1 AND Condition2;"
+        },
+        {
+            "input": "List entities sorted by a specific attribute.",
+            "query": "SELECT * FROM Entities ORDER BY Attribute;"
+        },
+        {
+            "input": "Count the number of records in a dataset.",
+            "query": "SELECT COUNT(*) FROM Dataset;"
+        },
+        {
+            "input": "Calculate the total value of a particular attribute.",
+            "query": "SELECT SUM(Attribute) FROM Entities;"
+        },
+        {
+            "input": "Find the average value of a specific attribute.",
+            "query": "SELECT AVG(Attribute) FROM Entities;"
+        },
+        {
+            "input": "Get the number of entities grouped by a certain attribute.",
+            "query": "SELECT Attribute, COUNT(*) FROM Entities GROUP BY Attribute;"
+        },
+        {
+            "input": "Retrieve information from two related datasets.",
+            "query": "SELECT Table1.Column1, Table2.Column2 FROM Table1 JOIN Table2 ON Table1.Key = Table2.Key;"
+        },
+        {
+            "input": "Get all records from one dataset along with matching records from another dataset.",
+            "query": "SELECT Table1.Column1, Table2.Column2 FROM Table1 LEFT JOIN Table2 ON Table1.Key = Table2.Key;"
+        },
+        {
+            "input": "Retrieve all records from one dataset and any matching records from another dataset.",
+            "query": "SELECT Table1.Column1, Table2.Column2 FROM Table1 RIGHT JOIN Table2 ON Table1.Key = Table2.Key;"
+        },
+        {
+            "input": "Get the sum of an attribute for records in two related datasets.",
+            "query": "SELECT SUM(Table1.Attribute) FROM Table1 JOIN Table2 ON Table1.Key = Table2.Key;"
+        },
+        {
+            "input": "Join a table with itself to find related records.",
+            "query": "SELECT A.Column1, B.Column2 FROM Table A JOIN Table B ON A.Key = B.RelatedKey;"
+        },
+        {
+            "input": "Find records that meet a condition based on results from another query.",
+            "query": "SELECT * FROM Table1 WHERE Attribute IN (SELECT Attribute FROM Table2 WHERE Condition);"
+        },
+        {
+            "input": "List the top 10 highest values of an attribute.",
+            "query": "SELECT * FROM Entities ORDER BY Attribute DESC LIMIT 10;"
+        },
+        {
+            "input": "Find the most recent records based on a date column.",
+            "query": "SELECT * FROM Entities ORDER BY DateColumn DESC LIMIT 10;"
+        },
+        {
+            "input": "Retrieve records with values in a specific range.",
+            "query": "SELECT * FROM Entities WHERE Attribute BETWEEN Value1 AND Value2;"
+        },
+        {
+            "input": "Get distinct values of a specific attribute.",
+            "query": "SELECT DISTINCT Attribute FROM Entities;"
+        },
+        {
+            "input": "Find records where an attribute is null.",
+            "query": "SELECT * FROM Entities WHERE Attribute IS NULL;"
+        },
+        {
+            "input": "Find records with an attribute that matches any value from a set.",
+            "query": "SELECT * FROM Entities WHERE Attribute IN (Value1, Value2, Value3);"
+        }
+    ]
+
+example_selector = SemanticSimilarityExampleSelector.from_examples(
+    examples,
+    embeddings,
+    FAISS,
+    k=3,
+    input_keys=["input"],
+    )
+
+matched_queries = example_selector.vectorstore.search(user_question, search_type = "mmr")
+
+for doc in matched_queries:
+    st.write(doc.page_content)
+
+
+if user_question:
+    with st.chat_message("user"):
+        st.write(user_question)
+        st.session_state.messages.append({"role": "user", "content": user_question})
+
+    with st.spinner("Thinking..."):
+        table_description += f" Now, using the tables and columns given, generate an SQL query to answer the question: '{user_question}'"
+
+        sql_query_schema = ResponseSchema(name="SQL Query", description="This is the SQL Query to pass to the database")
+        response_schemas = [sql_query_schema]
+        output_parser = StructuredOutputParser.from_response_schemas(response_schemas)
+        format_instructions = output_parser.get_format_instructions()
+        st.write(format_instructions)
+        st.write(table_description)
+        template = """
+        You are an advanced AI designed to generate precise SQL queries from natural language questions based on detailed information about a MySQL database.
+
+        **Your task is to:**
+        1. Understand the Table Names: Identify and use the correct table names. Accurate table names are crucial for forming the correct query.
+        2. Analyze Table Descriptions: Utilize the detailed descriptions of each table to correctly understand the structure and relationships of the data.
+        3. Refer to Table Details: Use the specific details from each table to create accurate SQL queries. This includes understanding the data and its format.
+        4. Generate the SQL Query: Formulate a SQL query that retrieves the relevant data based on the user's question and provided database information.
+        5. Ensure the query:
+        - Orders the results by relevant columns when applicable.
+        - Selects only the necessary columns relevant to the user's question.
+        - Is syntactically correct and logically sound.
+        6. Do not make any data modification statements (INSERT, UPDATE, DELETE, DROP, etc.) to the database.
+        7. If the user's question does not relate to the database, respond with "I don't know."
+
+        **Examples**:
+        {matched_queries}
+
+        **Provided Information**:
+        {table_description}
+
+        **Format Instructions**:
+        {format_instructions}
+        """
+    # Semantic Search Which will search for table and for the prompt examples. Top 5 examples after smeantic search for the prompt. FewShotExamples
+        prompt = ChatPromptTemplate.from_template(template=template)
+        messages = prompt.format_messages(
+            matched_queries=matched_queries,table_description=table_description, format_instructions=format_instructions
+        )
+        st.write(table_description)
+        response = llm.invoke(messages[0].content)
+        st.write("LLM Response:", response)
+        
+        json_pattern = r'\{(?:[^{}"]|"[^"]*"|\d+|true|false|null)*\}'
+        match = re.search(json_pattern, response)
+        if match:
+            json_string = match.group(0)
+            try:
+                query_dict = json.loads(json_string)
+                sql_query = query_dict.get("SQL Query", "")
+                #sql_query = re.sub(r'\bTOP\b', 'LIMIT', sql_query, flags=re.IGNORECASE)
+                output = db._execute(sql_query)
+                st.write(output)
+                
+                if output:
+                    df = pd.DataFrame(output)
+                    st.session_state.df = df  # Store DataFrame in session_state
+                    
+                    with st.chat_message("assistant"):
+                        st.write("DataFrame:", df)
+                    st.session_state.messages.append({"role": "assistant", "content": df.to_string()})
+                else:
+                    error = "No data returned from the query."
+                    st.write(error)
+                    st.session_state.messages.append({"role": "assistant", "content": error})
+            except json.JSONDecodeError as e:
+                error = f"Error decoding JSON: {e}"
+                st.write(error)
+                st.session_state.messages.append({"role": "assistant", "content": error})
+            except Exception as e:
+                error = f"Error executing SQL query: {e}"
+                st.write(error)
+                st.session_state.messages.append({"role": "assistant", "content": error})
+        else:
+            error = "No JSON string found."
+            st.write(error)
+            st.session_state.messages.append({"role": "assistant", "content": error})
+
+        if st.session_state.df is not None:
+            if st.button("Graph Numerical Data"):
+                try:
+                    st.write()
+                    pyg_app = StreamlitRenderer(st.session_state.df)
+                    pyg_app.explorer()
+                except Exception as e:
+                    st.write(f"Error generating graph: {e}")
