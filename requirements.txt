@@ -1,0 +1,9 @@
+streamlit
+pandas
+langchain-community
+jsonlib-python3  # json might be covered by the standard library, but jsonlib-python3 can be an alternative
+regex  # re is typically a standard library, but you might use regex as an alternative
+inflect
+pygwalker
+numpy
+scikit-learn
